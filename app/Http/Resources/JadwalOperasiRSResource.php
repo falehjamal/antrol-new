@@ -12,10 +12,10 @@ class JadwalOperasiRSResource extends JsonResource
             'kodebooking' => $this->id_operasi,
             'tanggaloperasi' => $this->tanggal,
             'jenistindakan' => strip_tags($this->tindakan),
-            'kodepoli' => $this->unit->poli ? $this->unit->poli->KODE_BPJS : '-',
-            'namapoli' => $this->unit->nama_unit,
+            'kodepoli' => $this->unit?->poli?->KODE_BPJS ?? '-',
+            'namapoli' => $this->unit?->nama_unit ?? '-',
             'terlaksana' => $this->status == 'selesai' ? 1 : 0,
-            'nopeserta' => $this->pasien->nopeserta,
+            'nopeserta' => $this->pasien?->nopeserta,
             'lastupdate' => time() * 1000,
         ];
     }
