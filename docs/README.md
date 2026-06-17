@@ -62,7 +62,7 @@ Aplikasi **tidak** memiliki frontend pasien. Semua interaksi dilakukan oleh sist
 
 | Koneksi | Env prefix | Fungsi |
 |---------|------------|--------|
-| `mysql` (default) | `DB_*` | Autentikasi API (`users`, session, queue, cache) |
+| `mysql` (default) | `DB_*` | Autentikasi API (`users`, session, cache) |
 | `mysql2` | `DB_*_SIMRS` | Data operasional rumah sakit (antrean, pasien, poli, dll.) |
 
 Hampir semua model bisnis (`Antrean`, `Pasien`, `Poli`, `Dokter`, dll.) menggunakan koneksi `mysql2`.
@@ -75,9 +75,8 @@ Hampir semua model bisnis (`Antrean`, `Pasien`, `Poli`, `Dokter`, dll.) mengguna
 |----------|-------------------|
 | Framework | Laravel ^13.8 |
 | Autentikasi | `php-open-source-saver/jwt-auth` (JWT) |
-| Integrasi BPJS | `najmulfaiz/bpjs` (VClaim, Antrean WS) |
-| HTTP Client | Laravel Http / Guzzle |
-| Queue | Database driver |
+| Integrasi BPJS | `najmulfaiz/bpjs` (dependency tersedia, belum dipakai aktif di kode) |
+| HTTP Client | Laravel Http |
 | Timezone | `Asia/Jakarta` |
 
 ---
@@ -98,10 +97,7 @@ antrol-new/
 │   │       ├── JadwalOperasiRSResource.php
 │   │       └── JadwalOperasiPasienResource.php
 │   ├── Helpers/
-│   │   ├── Bpjs.php                     # Helper rujukan & HFIS
 │   │   └── ResponseFormatter.php        # Format response standar BPJS
-│   ├── Jobs/
-│   │   └── SyncRujukanJob.php           # Sync rujukan ke service internal
 │   └── Models/                          # Eloquent → tabel SIMRS
 ├── config/
 │   ├── auth.php                         # Guard api = jwt
@@ -173,7 +169,7 @@ BPJS_ANTREAN_SERVICE_NAME=antreanrs
 ```bash
 php artisan serve
 # atau
-composer dev   # serve + queue + vite
+composer dev   # serve + vite (+ queue listener, tidak wajib — tidak ada background job aktif)
 ```
 
 Buat user API di tabel `users` (username + password bcrypt) agar BPJS dapat login.
@@ -425,7 +421,7 @@ Mendaftarkan pasien baru ke SIMRS jika NIK/no kartu belum ada. Setelah sukses, p
 
 **`POST /api/antrean/ambil`**
 
-Endpoint utama pengambilan nomor antrean. Route memetakan ke method **`ambilv3`** (versi terbaru).
+Endpoint utama pengambilan nomor antrean. Diimplementasikan oleh method **`ambilv3`** di `AntreanController` (satu-satunya handler untuk route ini).
 
 #### Request Body
 
@@ -451,7 +447,7 @@ Endpoint utama pengambilan nomor antrean. Route memetakan ke method **`ambilv3`*
 | 3 | Kontrol |
 | 4 | Rujukan Antar RS |
 
-#### Logika Bisnis (ambilv3)
+#### Logika Bisnis
 
 1. **Batas waktu hari-H:** jika `tanggalperiksa` = hari ini, pendaftaran ditutup **30 menit sebelum jam selesai praktek**
 2. **Rentang tanggal:** maksimal +30 hari ke depan
@@ -465,7 +461,7 @@ Endpoint utama pengambilan nomor antrean. Route memetakan ke method **`ambilv3`*
 10. Simpan `no_antrian` dengan sesi dan estimasi waktu layanan
 11. Trigger sync BPJS via HTTP GET ke service internal
 
-#### Format Kode Booking (v3)
+#### Format Kode Booking
 
 ```
 {YYMMDD}{kode_poli_3digit}{kode_dokter_3digit}-{no_urut_3digit}
@@ -516,14 +512,6 @@ Contoh: `250617034803-001`
 | 201 | `Kuota untuk poli ini sudah penuh` | Kuota habis |
 | 201 | `Nomor Antrean Hanya Dapat Diambil 1 Kali...` | Duplikasi |
 | **202** | `Data pasien ini tidak ditemukan...` | Pasien belum terdaftar → panggil `/pasien_baru` |
-
-#### Versi Method (tidak aktif di route)
-
-| Method | Perbedaan utama |
-|--------|-----------------|
-| `ambil` (v1) | Kuota per poli, kode booking `{YYYYMMDD}-{poli}-{urut}`, dispatch `SyncRujukanJob` |
-| `ambilv2` | Kuota poli/JAN berbeda, tanpa sesi dokter |
-| **`ambilv3`** | **Aktif** — kuota per dokter+sesi, kode booking baru, sync HTTP langsung |
 
 ---
 
@@ -757,8 +745,9 @@ sequenceDiagram
     API->>SIMRS: INSERT m_pasien
     API-->>MJKN: norm
 
-    MJKN->>API: POST /antrean/ambil
+    MJKN->>API: POST /antrean/ambil (ambilv3)
     API->>SIMRS: INSERT ag_pendaftaran_online, no_antrian
+    API->>API: GET sync-bpjs (service internal)
     API-->>MJKN: kodebooking, nomorantrean
 
     Note over MJKN,SIMRS: Hari H di rumah sakit
@@ -793,12 +782,22 @@ Mobile JKN → POST /antrean/batal
 | `Dokter` | `m_dokter` | Master dokter |
 | `JadwalDokter` | `t_jadwal_dokter` | Jadwal dokter per tanggal |
 | `JamPelayanan` | `jadwal_dokter` | Jam praktek & kuota per sesi |
-| `KuotaPoli` | — | Kuota poli per hari |
-| `PoliEstimasi` | — | Estimasi waktu layanan poli |
 | `Pendaftaran` | `t_pendaftaran` | Pendaftaran rawat jalan (check-in) |
 | `Tarif` | — | Tarif tindakan pendaftaran |
 | `TmpCartBayar` | — | Keranjang billing sementara |
 | `Operasi` | `t_operasi` | Jadwal operasi |
+| `Unit` | — | Unit/ruangan (relasi jadwal operasi) |
+
+### Method `AntreanController` (aktif)
+
+| Method | Route | Fungsi |
+|--------|-------|--------|
+| `status` | `POST /api/antrean/status` | Cek status antrean poli/dokter |
+| `pasien_baru` | `POST /api/antrean/pasien_baru` | Registrasi pasien baru |
+| `ambilv3` | `POST /api/antrean/ambil` | Ambil nomor antrean |
+| `sisa` | `POST /api/antrean/sisa` | Sisa antrean by kode booking |
+| `batal` | `POST /api/antrean/batal` | Batalkan antrean |
+| `checkin` | `POST /api/antrean/checkin` | Check-in pasien |
 
 ### Tabel Auth (koneksi `mysql`)
 
@@ -806,36 +805,28 @@ Mobile JKN → POST /antrean/batal
 |-------|--------|
 | `users` | Kredensial API BPJS (username/password) |
 | `sessions` | Session Laravel |
-| `jobs` | Queue jobs |
 
 ---
 
 ## Integrasi Eksternal
 
-### BPJS Web Service
+### Konfigurasi BPJS
 
-Helper `App\Helpers\Bpjs` menyediakan:
+File `config/bpjs.php` dan kredensial `.env` (VClaim, Antrean WS) sudah disiapkan untuk integrasi langsung ke API BPJS. Saat ini **belum dipanggil** dari kode aplikasi — validasi rujukan/HFIS tidak dijalankan; field `nomorreferensi` hanya divalidasi wajib diisi.
 
-- `rujukan_by_nomorreferensi()` — validasi rujukan via VClaim (saat ini **dikomentari** di controller)
-- `cek_jadwal_hfis()` — cek jadwal HFIS via Antrean WS (saat ini **dikomentari**)
+### Sync Internal (setelah ambil antrean)
 
-Konfigurasi di `config/bpjs.php`, kredensial dari `.env`.
-
-### Sync Internal
-
-Setelah ambil antrean (`ambilv3`), sistem memanggil:
+Setelah sukses `ambilv3`, sistem memanggil service internal secara **sinkron** (bukan queue job):
 
 ```
 GET http://10.0.108.247:8000/api/sync-bpjs?id={id_pendaftaran_online}
 ```
 
-Job `SyncRujukanJob` (v1) memanggil:
+- Dipanggil via `Http::get()` di dalam request `ambilv3`
+- Error HTTP di-**catch** dan diabaikan agar response antrean tetap sukses ke Mobile JKN
+- URL hardcoded — sesuaikan dengan environment production
 
-```
-GET http://10.0.108.249:82/bpjs?id={id_online}
-```
-
-> URL hardcoded — sesuaikan dengan environment production.
+> **Tidak ada queue job aktif** di proyek ini. Worker `queue:listen` di `composer dev` opsional dan tidak diperlukan untuk alur antrean saat ini.
 
 ### PPK Pelayanan
 
@@ -845,9 +836,9 @@ Kode PPK RS diset di `ag_pendaftaran_online_bpjs.ppk_pelayanan = 1133R001`.
 
 ## Catatan Implementasi
 
-1. **Route aktif vs method legacy:** Hanya `ambilv3` yang dipakai di route. Method `ambil` dan `ambilv2` masih ada di controller sebagai referensi versi lama.
+1. **Satu handler ambil antrean:** Route `/api/antrean/ambil` hanya memanggil `ambilv3`. Kuota dihitung per dokter + sesi dari tabel `jadwal_dokter` (`JamPelayanan`).
 
-2. **Validasi rujukan dinonaktifkan:** Pengecekan rujukan BPJS dan HFIS saat ini di-comment; pendaftaran tidak memvalidasi `nomorreferensi` ke VClaim.
+2. **Validasi rujukan:** `nomorreferensi` wajib di request, tetapi tidak divalidasi ke VClaim/BPJS. Sync data rujukan ditangani service internal (`sync-bpjs`).
 
 3. **Cara bayar default:** Semua pendaftaran online diset `cara_bayar = 10` (BPJS/JKN).
 
@@ -860,6 +851,8 @@ Kode PPK RS diset di `ag_pendaftaran_online_bpjs.ppk_pelayanan = 1133R001`.
 7. **Middleware JWT:** Token harus dikirim via header `x-token`, bukan `Authorization: Bearer`.
 
 8. **Error code BPJS:** Sebagian besar error mengembalikan HTTP 201 (bukan 400/422), sesuai konvensi webservice Antrol BPJS.
+
+9. **Mapping poli khusus:** `kodepoli = IRM` dipetakan ke poli internal kode `34`.
 
 ---
 
