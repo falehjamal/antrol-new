@@ -16,6 +16,12 @@ return Application::configure(basePath: dirname(__DIR__))
         $middleware->alias([
             'jwt' => \App\Http\Middleware\JwtMiddleware::class,
         ]);
+
+        $middleware->appendToGroup('api', [
+            \App\Http\Middleware\LogApiRequest::class,
+        ]);
+
+        $middleware->redirectGuestsTo(fn () => route('login'));
     })
     ->withExceptions(function (Exceptions $exceptions): void {
         $exceptions->shouldRenderJsonWhen(
