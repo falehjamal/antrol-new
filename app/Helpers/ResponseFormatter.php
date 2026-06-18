@@ -4,29 +4,24 @@ namespace App\Helpers;
 
 class ResponseFormatter
 {
-    protected static $response = [
-        'metadata' => [
-            'code' => 200,
-            'message' => null,
-        ],
-        'response' => null,
-    ];
-
     public static function success($data = null, $message = null, $code = 200)
     {
-        self::$response['metadata']['code'] = $code;
-        self::$response['metadata']['message'] = $message;
-        self::$response['response'] = $data;
-
-        return response()->json(self::$response, self::$response['metadata']['code']);
+        return self::json($data, $message, $code);
     }
 
     public static function error($data = null, $message = null, $code = 400)
     {
-        self::$response['metadata']['code'] = $code;
-        self::$response['metadata']['message'] = $message;
-        self::$response['response'] = $data;
+        return self::json($data, $message, $code);
+    }
 
-        return response()->json(self::$response, self::$response['metadata']['code']);
+    private static function json($data, $message, int $code)
+    {
+        return response()->json([
+            'metadata' => [
+                'code' => $code,
+                'message' => $message,
+            ],
+            'response' => $data,
+        ], $code);
     }
 }

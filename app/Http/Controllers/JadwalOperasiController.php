@@ -13,46 +13,49 @@ class JadwalOperasiController extends Controller
 {
     public function all(Request $request)
     {
-        $request->validate( [
+        $request->validate([
             'tanggalawal' => 'required|date',
-            'tanggalakhir' => 'required|date'
+            'tanggalakhir' => 'required|date',
         ]);
 
-        if($request->tanggalakhir < $request->tanggalawal) {
+        if ($request->tanggalakhir < $request->tanggalawal) {
             return ResponseFormatter::error([], 'Tanggal akhir tidak boleh melebihi tanggal awal', 201);
         }
 
-        $list = Operasi::whereBetween('tanggal', [$request->tanggalawal, $request->tanggalakhir])
-                        ->where(function($query) {
-                            $query->where('status', 'selesai');
-                            $query->orWhereNull('status');
-                        })
-                        ->get();
+        $list = $this->activeOperationQuery()
+            ->whereBetween('tanggal', [$request->tanggalawal, $request->tanggalakhir])
+            ->get();
 
         return ResponseFormatter::success([
-            'list' => JadwalOperasiRSResource::collection($list)
+            'list' => JadwalOperasiRSResource::collection($list),
         ], 'Ok');
     }
 
     public function pasien(Request $request)
     {
-        $request->validate( [
+        $request->validate([
             'nopeserta' => 'required|string|size:13',
         ]);
 
         $nopeserta = $request->nopeserta;
 
-        $list = Operasi::whereHas('pasien', function(Builder $query) use ($nopeserta) {
-                            $query->where('nopeserta', $nopeserta);
-                        })
-                        ->where(function($query) {
-                            $query->where('status', 'selesai');
-                            $query->orWhereNull('status');
-                        })
-                        ->get();
+        $list = $this->activeOperationQuery()
+            ->whereHas('pasien', function (Builder $query) use ($nopeserta) {
+                $query->where('nopeserta', $nopeserta);
+            })
+            ->get();
 
         return ResponseFormatter::success([
-            'list' => JadwalOperasiPasienResource::collection($list)
+            'list' => JadwalOperasiPasienResource::collection($list),
         ], 'Ok');
+    }
+
+    private function activeOperationQuery(): Builder
+    {
+        return Operasi::query()
+            ->where(function (Builder $query) {
+                $query->where('status', 'selesai')
+                    ->orWhereNull('status');
+            });
     }
 }

@@ -22,14 +22,17 @@ use Illuminate\Support\Facades\Log;
 
 class AntreanController extends Controller
 {
+    private const DEFAULT_KUOTA = 60;
+
+    private const DEFAULT_SESI = 'pagi';
 
     public function status(Request $request)
     {
-        $request->validate( [
-            'kodepoli'       => 'required',
-            'kodedokter'     => 'required',
+        $request->validate([
+            'kodepoli' => 'required',
+            'kodedokter' => 'required',
             'tanggalperiksa' => 'required|date',
-            'jampraktek'     => 'required',
+            'jampraktek' => 'required',
         ]);
 
         $poli = Poli::where('KODE_BPJS', $request->kodepoli)->first();
@@ -51,80 +54,47 @@ class AntreanController extends Controller
         }
 
         $jampraktek = explode('-', $request->jampraktek);
-        $jam_pelayanan = JamPelayanan::where('kodepoly', $poli->kode)
-            ->where('kodedokter', $dokter->KDDOKTER)
-            ->where('hari', date('N', strtotime($request->tanggalperiksa)))
-            ->where('jam_mulai', $jampraktek[0])
-            ->where('jam_selesai', $jampraktek[1])
-            ->first();
+        $jam_pelayanan = $this->findJamPelayanan($poli->kode, $dokter->KDDOKTER, $request->tanggalperiksa, $jampraktek);
 
-        if (!$jam_pelayanan) {
-            return ResponseFormatter::error([], 'Jadwal Dokter ' . $dokter->NAMADOKTER . ' Tersebut Belum Tersedia untuk online, Silahkan Reschedule Tanggal dan Jam Praktek Lainnya', 201);
+        if (! $jam_pelayanan) {
+            return ResponseFormatter::error([], 'Jadwal Dokter '.$dokter->NAMADOKTER.' Tersebut Belum Tersedia untuk online, Silahkan Reschedule Tanggal dan Jam Praktek Lainnya', 201);
         }
 
-        $kuota_nilai = $jam_pelayanan->kuota == '' ? 60 : $jam_pelayanan->kuota;
-        $sesi = $jam_pelayanan->sesi ?? 'pagi';
+        $kuota_nilai = $this->getKuotaNilai($jam_pelayanan);
+        $sesi = $this->getSesi($jam_pelayanan->sesi);
+        $summary = $this->buildAntreanSummary($request->tanggalperiksa, $poli->kode, $dokter->KDDOKTER, $sesi, $kuota_nilai);
 
-        $totalantrean = Antrean::where('tgl', $request->tanggalperiksa)
-            ->where('kd_poli', $poli->kode)
-            ->where('kd_dokter', $dokter->KDDOKTER)
-            ->where('batal', '<>', '1')
-            ->where('sesi', $sesi)
-            ->count();
-
-        $antrean = Antrean::whereHas('pendaftaran', function (Builder $query) {
-            $query->where('status', 0);
-        })
-            ->where('tgl', $request->tanggalperiksa)
-            ->where('kd_poli', $poli->kode)
-            ->where('kd_dokter', $dokter->KDDOKTER)
-            ->where('sesi', $sesi)
-            ->get();
-
-        $sisaantrean = $kuota_nilai - $totalantrean;
-
-        return ResponseFormatter::success([
-            'namapoli' => $poli->nama,
-            'namadokter' => $dokter->NAMADOKTER,
-            'totalantrean' => $totalantrean,
-            'sisaantrean' => $antrean->count(),
-            'antreanpanggil' => $antrean->first() ? $antrean->first()->no_urut : null,
-            'sisakuotajkn' => $sisaantrean < 1 ? 0 : $sisaantrean,
-            'kuotajkn' => $kuota_nilai,
-            'sisakuotanonjkn' => $sisaantrean < 1 ? 0 : $sisaantrean,
-            'kuotanonjkn' => $kuota_nilai,
-            'keterangan' => ""
-        ], 'Ok');
+        return ResponseFormatter::success($this->buildStatusPayload($poli->nama, $dokter->NAMADOKTER, $summary, $kuota_nilai), 'Ok');
     }
 
     public function pasien_baru(Request $request)
     {
-        $request->validate( [
-            "nomorkartu" => 'required|string|size:13',
-            "nik" => 'required|string|size:16',
-            "nomorkk" => 'required|string|size:16',
-            "nama" => 'required|string|max:255',
-            "jeniskelamin" => 'required|in:L,P',
-            "tanggallahir" => 'required|date|before_or_equal:today',
-            "nohp" => 'required|string|max:20',
-            "alamat" => 'required|string',
-            "kodeprop" => 'required|string',
-            "namaprop" => 'required|string',
-            "kodedati2" => 'required|string',
-            "namadati2" => 'required|string',
-            "kodekec" => 'required|string',
-            "namakec" => 'required|string',
-            "kodekel" => 'required|string',
-            "namakel" => 'required|string',
-            "rw" => 'required|string',
-            "rt" => 'required|string',
+        $request->validate([
+            'nomorkartu' => 'required|string|size:13',
+            'nik' => 'required|string|size:16',
+            'nomorkk' => 'required|string|size:16',
+            'nama' => 'required|string|max:255',
+            'jeniskelamin' => 'required|in:L,P',
+            'tanggallahir' => 'required|date|before_or_equal:today',
+            'nohp' => 'required|string|max:20',
+            'alamat' => 'required|string',
+            'kodeprop' => 'required|string',
+            'namaprop' => 'required|string',
+            'kodedati2' => 'required|string',
+            'namadati2' => 'required|string',
+            'kodekec' => 'required|string',
+            'namakec' => 'required|string',
+            'kodekel' => 'required|string',
+            'namakel' => 'required|string',
+            'rw' => 'required|string',
+            'rt' => 'required|string',
         ]);
 
         $pasien = Pasien::where('noktp', $request->nik)
             ->orWhere('nopeserta', $request->nomorkartu)
             ->first();
 
-        if (!empty($pasien)) {
+        if (! empty($pasien)) {
             return ResponseFormatter::error([], 'Data Peserta Sudah Pernah Dientrikan', 201);
         }
 
@@ -140,24 +110,22 @@ class AntreanController extends Controller
         $new_pasien->nopeserta = $request->nomorkartu;
         $new_pasien->NOTELP = $request->nohp;
 
-        if (!$new_pasien->save()) {
+        if (! $new_pasien->save()) {
             return ResponseFormatter::error([], 'Pendaftaran pasien baru gagal', 201);
         }
 
         return ResponseFormatter::success([
-            'norm' => $new_pasien->NOMR
+            'norm' => $new_pasien->NOMR,
         ], 'Harap datang ke admisi untuk melengkapi data rekam medis');
     }
 
     public function sisa(Request $request)
     {
-        $request->validate( [
+        $request->validate([
             'kodebooking' => 'required',
         ]);
 
-        $antrol = Antrean::where('kode_booking', $request->kodebooking)
-            ->orWhere('id_online', $request->kodebooking)
-            ->first();
+        $antrol = $this->findAntreanByBooking($request->kodebooking);
 
         if (empty($antrol)) {
             return ResponseFormatter::error([], 'Kode booking tidak ditemukan (Antrean)', 201);
@@ -166,78 +134,48 @@ class AntreanController extends Controller
         // $pendaftaran = AgPendaftaranOnline::where('id', $request->kodebooking)
         //                                     ->first();
 
-        if (!$antrol->pendaftaran_online) {
+        if (! $antrol->pendaftaran_online) {
             return ResponseFormatter::error([], 'Kode booking tidak ditemukan (Pendaftaran)', 201);
         }
 
         $pendaftaran = $antrol->pendaftaran_online;
 
-        $sesi = $antrol->sesi ?? 'pagi';
-        $jam_pelayanan = JamPelayanan::where('kodepoly', $pendaftaran->kodepoly)
-            ->where('kodedokter', $pendaftaran->kodedokter)
-            ->where('hari', date('N', strtotime($pendaftaran->tanggal_periksa)))
-            ->where('sesi', $sesi)
-            ->orderBy('jam_mulai')
-            ->first();
+        $sesi = $this->getSesi($antrol->sesi);
+        $jam_pelayanan = $this->findJamPelayananBySesi($pendaftaran->kodepoly, $pendaftaran->kodedokter, $pendaftaran->tanggal_periksa, $sesi);
 
-        if (!$jam_pelayanan) {
-            return ResponseFormatter::error([], 'Jadwal Dokter ' . $pendaftaran->dokter->NAMADOKTER . ' Tersebut Belum Tersedia untuk online, Silahkan Reschedule Tanggal dan Jam Praktek Lainnya', 201);
+        if (! $jam_pelayanan) {
+            return ResponseFormatter::error([], 'Jadwal Dokter '.$pendaftaran->dokter->NAMADOKTER.' Tersebut Belum Tersedia untuk online, Silahkan Reschedule Tanggal dan Jam Praktek Lainnya', 201);
         }
 
-        $kuota_nilai = $jam_pelayanan->kuota == '' ? 60 : $jam_pelayanan->kuota;
+        $kuota_nilai = $this->getKuotaNilai($jam_pelayanan);
         $sesi = $jam_pelayanan->sesi ?? $sesi;
+        $summary = $this->buildAntreanSummary($pendaftaran->tanggal_periksa, $pendaftaran->kodepoly, $pendaftaran->kodedokter, $sesi, $kuota_nilai);
 
-        $totalantrean = Antrean::where('tgl', $pendaftaran->tanggal_periksa)
-            ->where('kd_poli', $pendaftaran->kodepoly)
-            ->where('kd_dokter', $pendaftaran->kodedokter)
-            ->where('batal', '<>', '1')
-            ->where('sesi', $sesi)
-            ->count();
-
-        $antrean = Antrean::whereHas('pendaftaran', function (Builder $query) {
-            $query->where('status', 0);
-        })
-            ->where('tgl', $pendaftaran->tanggal_periksa)
-            ->where('kd_poli', $pendaftaran->kodepoly)
-            ->where('kd_dokter', $pendaftaran->kodedokter)
-            ->where('sesi', $sesi)
-            ->get();
-
-        $sisaantrean = $kuota_nilai - $totalantrean;
-
-        return ResponseFormatter::success([
-            'namapoli' => $pendaftaran->poli->nama,
-            'namadokter' => $pendaftaran->dokter->NAMADOKTER,
-            'totalantrean' => $totalantrean,
-            'sisaantrean' => $antrean->count(),
-            'antreanpanggil' => $antrean->first() ? $antrean->first()->no_urut : null,
-            'sisakuotajkn' => $sisaantrean < 1 ? 0 : $sisaantrean,
-            'kuotajkn' => $kuota_nilai,
-            'sisakuotanonjkn' => $sisaantrean < 1 ? 0 : $sisaantrean,
-            'kuotanonjkn' => $kuota_nilai,
-            'keterangan' => ""
-        ], 'Ok');
+        return ResponseFormatter::success($this->buildStatusPayload($pendaftaran->poli->nama, $pendaftaran->dokter->NAMADOKTER, $summary, $kuota_nilai), 'Ok');
     }
 
     public function batal(Request $request)
     {
-        $request->validate( [
+        $request->validate([
             'kodebooking' => 'required',
             'keterangan' => 'required',
         ]);
 
         $antrol = DB::connection('mysql2')
-                    ->table('no_antrian')
-                    ->leftJoin('ag_pendaftaran_online', 'ag_pendaftaran_online.id', '=', 'no_antrian.id_online')
-                    ->whereRaw('no_antrian.kode_booking = ? OR no_antrian.id_online = ?', [$request->kodebooking, $request->kodebooking])
-                    ->select('no_antrian.kode_booking', 'ag_pendaftaran_online.id')
-                    ->first();
+            ->table('no_antrian')
+            ->leftJoin('ag_pendaftaran_online', 'ag_pendaftaran_online.id', '=', 'no_antrian.id_online')
+            ->where(function ($query) use ($request) {
+                $query->where('no_antrian.kode_booking', $request->kodebooking)
+                    ->orWhere('no_antrian.id_online', $request->kodebooking);
+            })
+            ->select('no_antrian.kode_booking', 'ag_pendaftaran_online.id')
+            ->first();
 
         if (empty($antrol)) {
             return ResponseFormatter::error([], 'Kode booking tidak ditemukan (Antrean)', 201);
         }
 
-        if (!$antrol->id) {
+        if (! $antrol->id) {
             return ResponseFormatter::error([], 'Kode booking tidak ditemukan (Pendaftaran)', 201);
         }
 
@@ -255,15 +193,19 @@ class AntreanController extends Controller
         $pendaftaran->batal = 1;
         $pendaftaran->alasan_batal = $request->keterangan;
 
-        if (!$pendaftaran->save()) {
+        if (! $pendaftaran->save()) {
             return ResponseFormatter::error([], 'Gagal', 201);
         }
 
-        $antrean = Antrean::where('kode_booking', $request->kodebooking)->first();
+        $antrean = $this->findAntreanByBooking($request->kodebooking);
+        if (! $antrean) {
+            return ResponseFormatter::error([], 'Kode booking tidak ditemukan (Antrean)', 201);
+        }
+
         $antrean->batal = 1;
         $antrean->alasan_batal = $request->keterangan;
 
-        if (!$antrean->update()) {
+        if (! $antrean->update()) {
             return ResponseFormatter::error([], 'Gagal', 201);
         }
 
@@ -272,55 +214,62 @@ class AntreanController extends Controller
 
     public function checkin(Request $request)
     {
-        $request->validate( [
+        $request->validate([
             'kodebooking' => 'required',
-            'waktu'       => 'required',
+            'waktu' => 'required',
         ]);
 
         // $pendaftaran_online = AgPendaftaranOnline::where('id', $request->kodebooking)
         //                                         ->first();
 
-        Log::info('BEGIN CHECKIN ' . $request->kodebooking . ' | ' . $request->waktu);
+        Log::info('BEGIN CHECKIN '.$request->kodebooking.' | '.$request->waktu);
 
-        $antrean = Antrean::where('kode_booking', $request->kodebooking)
-            ->orWhere('id_online', $request->kodebooking)
-            ->first();
+        $antrean = $this->findAntreanByBooking($request->kodebooking);
 
         if (empty($antrean)) {
             Log::info('Kode Booking Tidak Ditemukan');
+
             return ResponseFormatter::error([], 'Kode booking tidak ditemukan', 201);
         }
 
         $pendaftaran_online = $antrean->pendaftaran_online;
+        if (! $pendaftaran_online) {
+            Log::info('Pendaftaran Online Tidak Ditemukan');
+
+            return ResponseFormatter::error([], 'Kode booking tidak ditemukan', 201);
+        }
 
         if ($pendaftaran_online->tanggal_periksa != date('Y-m-d', ($request->waktu / 1000))) {
             Log::info('Tanggal Check In Tidak Sama');
+
             return ResponseFormatter::error([], 'Check in hanya dapat dilakukan sesuai tanggal periksa', 201);
         }
 
         if ($pendaftaran_online->status_hadir == '1') {
             Log::info('Pasien Sudah Check In');
+
             return ResponseFormatter::error([], 'Pasien sudah melakukan check in', 201);
         }
 
         if ($pendaftaran_online->batal == '1') {
             Log::info('Pasien Sudah Batal');
+
             return ResponseFormatter::error([], 'Antrean tidak ditemukan atau sudah dibatalkan', 201);
         }
 
-        $pendaftaran  = new Pendaftaran;
-        $pendaftaran->NOMR              = $pendaftaran_online->nomr;
-        $pendaftaran->KDRUJUK           = $pendaftaran_online->KDRUJUK == '0' ? '1' : $pendaftaran_online->KDRUJUK;
-        $pendaftaran->TGLREG            = $pendaftaran_online->tanggal_periksa;
-        $pendaftaran->KDDOKTER          = $pendaftaran_online->kodedokter;
-        $pendaftaran->KDPOLY            = $pendaftaran_online->kodepoly;
-        $pendaftaran->KDCARABAYAR       = $pendaftaran_online->cara_bayar;
-        $pendaftaran->SHIFT             = '1';
-        $pendaftaran->STATUS            = '0';
+        $pendaftaran = new Pendaftaran;
+        $pendaftaran->NOMR = $pendaftaran_online->nomr;
+        $pendaftaran->KDRUJUK = $pendaftaran_online->KDRUJUK == '0' ? '1' : $pendaftaran_online->KDRUJUK;
+        $pendaftaran->TGLREG = $pendaftaran_online->tanggal_periksa;
+        $pendaftaran->KDDOKTER = $pendaftaran_online->kodedokter;
+        $pendaftaran->KDPOLY = $pendaftaran_online->kodepoly;
+        $pendaftaran->KDCARABAYAR = $pendaftaran_online->cara_bayar;
+        $pendaftaran->SHIFT = '1';
+        $pendaftaran->STATUS = '0';
         $pendaftaran->KETERANGAN_STATUS = '0';
-        $pendaftaran->PASIENBARU        = '1';
-        $pendaftaran->JAMREG            = date('Y-m-d H:i:s');
-        $pendaftaran->NIP               = 'pendaftaran';
+        $pendaftaran->PASIENBARU = '1';
+        $pendaftaran->JAMREG = date('Y-m-d H:i:s');
+        $pendaftaran->NIP = 'pendaftaran';
         $pendaftaran->save();
 
         $tarif = Tarif::where('kode_unit', $pendaftaran_online->kodepoly)
@@ -329,23 +278,39 @@ class AntreanController extends Controller
 
         $ip = $request->ip();
         $tmpCartBayar = new TmpCartBayar;
-        $tmpCartBayar->KODETARIF      = $tarif->kode_tindakan;
-        $tmpCartBayar->QTY            = 1;
-        $tmpCartBayar->IP             = $ip;
-        $tmpCartBayar->ID             = $tarif->kode_tindakan;
-        $tmpCartBayar->POLY           = $pendaftaran_online->kodepoly;
-        $tmpCartBayar->KDDOKTER       = $pendaftaran_online->kodedokter;
-        $tmpCartBayar->TARIF          = $tarif->tarif;
-        $tmpCartBayar->TOTTARIF       = $tarif->tarif;
+        $tmpCartBayar->KODETARIF = $tarif->kode_tindakan;
+        $tmpCartBayar->QTY = 1;
+        $tmpCartBayar->IP = $ip;
+        $tmpCartBayar->ID = $tarif->kode_tindakan;
+        $tmpCartBayar->POLY = $pendaftaran_online->kodepoly;
+        $tmpCartBayar->KDDOKTER = $pendaftaran_online->kodedokter;
+        $tmpCartBayar->TARIF = $tarif->tarif;
+        $tmpCartBayar->TOTTARIF = $tarif->tarif;
         $tmpCartBayar->JASA_PELAYANAN = $tarif->jasa_pelayanan;
-        $tmpCartBayar->JASA_SARANA    = $tarif->jasa_sarana;
-        $tmpCartBayar->UNIT           = $pendaftaran_online->kodepoly;
-        $tmpCartBayar->id_kategori    = $tarif->id_kategori;
+        $tmpCartBayar->JASA_SARANA = $tarif->jasa_sarana;
+        $tmpCartBayar->UNIT = $pendaftaran_online->kodepoly;
+        $tmpCartBayar->id_kategori = $tarif->id_kategori;
         $tmpCartBayar->save();
 
-        $save_tindakan = DB::connection('mysql2')->select('CALL pr_savebill_tindakanrajal_dokter("' . $pendaftaran_online->nomr . '", "1", "pendaftaran", "' . $pendaftaran->IDXDAFTAR . '", CURDATE(), 0, 0, "' . $ip . '", "' . $pendaftaran_online->cara_bayar . '", "' . $pendaftaran_online->kodepoly . '", 0, "' . $pendaftaran_online->kodedokter . '", "' . $pendaftaran_online->kodepoly . '")');
+        DB::connection('mysql2')->select(
+            'CALL pr_savebill_tindakanrajal_dokter(?, ?, ?, ?, CURDATE(), ?, ?, ?, ?, ?, ?, ?, ?)',
+            [
+                $pendaftaran_online->nomr,
+                '1',
+                'pendaftaran',
+                $pendaftaran->IDXDAFTAR,
+                0,
+                0,
+                $ip,
+                $pendaftaran_online->cara_bayar,
+                $pendaftaran_online->kodepoly,
+                0,
+                $pendaftaran_online->kodedokter,
+                $pendaftaran_online->kodepoly,
+            ]
+        );
 
-        $pendaftaran_online->status_hadir  = '1';
+        $pendaftaran_online->status_hadir = '1';
         $pendaftaran_online->status_berkas = '1';
         $pendaftaran_online->update();
 
@@ -361,7 +326,7 @@ class AntreanController extends Controller
 
     public function ambilv3(Request $request)
     {
-        $request->validate( [
+        $request->validate([
             'nomorkartu' => 'required|string|size:13',
             'nik' => 'required|string|size:16',
             'nohp' => 'required|string|min:10|max:13',
@@ -374,7 +339,7 @@ class AntreanController extends Controller
             'nomorreferensi' => 'required',
         ]);
 
-        Log::info('Request : ' . json_encode($request->all()));
+        Log::info('Request : '.json_encode($request->all()));
 
         // BEGIN CEK WAKTU DAFTAR
         $tanggal_daftar = date('Y-m-d');
@@ -385,7 +350,7 @@ class AntreanController extends Controller
         $batas_waktu = date('H:i:s', strtotime('-30 minutes', strtotime($jam_selesai)));
 
         if ($request->tanggalperiksa <= $tanggal_daftar) {
-            if (time() <= strtotime($tanggal_daftar . ' ' . $batas_waktu)) {
+            if (time() <= strtotime($tanggal_daftar.' '.$batas_waktu)) {
                 // echo "MASUK 2 " . date('Y-m-d H:i:s');
             } else {
                 return ResponseFormatter::error([], 'Pendaftaran untuk hari ini sudah ditutup', 201);
@@ -412,7 +377,7 @@ class AntreanController extends Controller
             ->where('kodedokter', $dokter->KDDOKTER)
             ->first();
         if (empty($jadwal_dokter)) {
-            return ResponseFormatter::error([], 'Jadwal Dokter ' . $dokter->NAMADOKTER . ' Tersebut Belum Tersedia untuk online, Silahkan Reschedule Tanggal dan Jam Praktek Lainnya', 201);
+            return ResponseFormatter::error([], 'Jadwal Dokter '.$dokter->NAMADOKTER.' Tersebut Belum Tersedia untuk online, Silahkan Reschedule Tanggal dan Jam Praktek Lainnya', 201);
         }
         // END CEK JADWAL DOKTER SIMRS
 
@@ -420,31 +385,21 @@ class AntreanController extends Controller
         $kd_poli = $poli->kode;
         $kd_dokter = $dokter->KDDOKTER; // 803 36
         $tanggal = $request->tanggalperiksa;
-        $jam_pelayanan = JamPelayanan::where('kodepoly', $kd_poli)
-                                        ->where('kodedokter', $kd_dokter)
-                                        ->where('hari', date('N', strtotime($tanggal)))
-                                        ->where('jam_mulai', $jampraktek[0])
-                                        ->where('jam_selesai', $jampraktek[1])
-                                        ->first();
+        $jam_pelayanan = $this->findJamPelayanan($kd_poli, $kd_dokter, $tanggal, $jampraktek);
 
-        if(!$jam_pelayanan) {
-            return ResponseFormatter::error([], 'Jadwal Dokter ' . $dokter->NAMADOKTER . ' Tersebut Belum Tersedia untuk online, Silahkan Reschedule Tanggal dan Jam Praktek Lainnya', 201);
+        if (! $jam_pelayanan) {
+            return ResponseFormatter::error([], 'Jadwal Dokter '.$dokter->NAMADOKTER.' Tersebut Belum Tersedia untuk online, Silahkan Reschedule Tanggal dan Jam Praktek Lainnya', 201);
         }
 
-        $kuota            = $jam_pelayanan->kuota == '' ? 60 : $jam_pelayanan->kuota;
-        $jam_mulai        = strtotime($tanggal . ' ' . $jam_pelayanan->jam_mulai);
-        $jam_max_estimasi = strtotime('-30 minutes', strtotime($tanggal . ' ' . $jam_pelayanan->jam_selesai));
+        $kuota = $this->getKuotaNilai($jam_pelayanan);
+        $jam_mulai = strtotime($tanggal.' '.$jam_pelayanan->jam_mulai);
+        $jam_max_estimasi = strtotime('-30 minutes', strtotime($tanggal.' '.$jam_pelayanan->jam_selesai));
         $estimasi_layanan = $jam_pelayanan->estimasi ?? 6;
-        $sesi = $jam_pelayanan->sesi ?? 'pagi';
+        $sesi = $this->getSesi($jam_pelayanan->sesi);
         // END GET KUOTA, ESTIMASI LAYAN, JAM MULAI
 
         // BEGIN CEK ANTRIAN
-        $totalantrean = Antrean::where('tgl', $request->tanggalperiksa)
-                                ->where('kd_poli', $poli->kode)
-                                ->where('kd_dokter', $kd_dokter)
-                                ->where('batal', '<>', '1')
-                                ->where('sesi', $sesi)
-                                ->count();
+        $totalantrean = $this->antreanAktifQuery($request->tanggalperiksa, $poli->kode, $kd_dokter, $sesi)->count();
 
         $sisaantrean = $kuota ? $kuota - $totalantrean : 0;
         if ($sisaantrean <= 0) {
@@ -454,37 +409,37 @@ class AntreanController extends Controller
 
         // BEGIN GENERATE KODEBOOKING
         $antrean_akhir = Antrean::where('tgl', $tanggal)
-                                ->where('kd_poli', $kd_poli)
-                                ->where('kd_dokter', $kd_dokter)
-                                ->where('sesi', $sesi)
-                                ->orderBy('no_urut', 'desc')
-                                ->first();
+            ->where('kd_poli', $kd_poli)
+            ->where('kd_dokter', $kd_dokter)
+            ->where('sesi', $sesi)
+            ->orderBy('no_urut', 'desc')
+            ->first();
 
         $urut_baru = $antrean_akhir ? $antrean_akhir->no_urut + 1 : 1;
-        $estimasi = $antrean_akhir ? strtotime('+' . ($estimasi_layanan * ($urut_baru - 1)) . ' minutes', $jam_mulai) : $jam_mulai;
-        if($estimasi > $jam_max_estimasi) {
+        $estimasi = $antrean_akhir ? strtotime('+'.($estimasi_layanan * ($urut_baru - 1)).' minutes', $jam_mulai) : $jam_mulai;
+        if ($estimasi > $jam_max_estimasi) {
             $estimasi = $jam_max_estimasi;
         }
 
-        $prefix = date('ymd', strtotime($tanggal)) . sprintf('%03s', $kd_poli) . sprintf('%03s', $kd_dokter);
-        $kodebooking = $prefix . '-' . sprintf('%03s', $urut_baru);
+        $prefix = date('ymd', strtotime($tanggal)).sprintf('%03s', $kd_poli).sprintf('%03s', $kd_dokter);
+        $kodebooking = $prefix.'-'.sprintf('%03s', $urut_baru);
         // END GENERATE KODEBOOKING
 
-        $nomr       = $request->nomr;
-        $nik        = $request->nik;
+        $nomr = $request->nomr;
+        $nik = $request->nik;
         $nomorkartu = $request->nomorkartu;
         // BEGIN CEK PENDAFTARAN
         $pendaftaran = AgPendaftaranOnline::where('tanggal_periksa', $request->tanggalperiksa)
-                                            ->where('kodepoly', $poli->kode)
-                                            ->where(function ($query) use ($nomr, $nik, $nomorkartu) {
-                                                $query->where('nomr', $nomr);
-                                                $query->orWhere('nik', $nik);
-                                                $query->orWhere('no_kartu', $nomorkartu);
-                                            })
-                                            ->whereNull('batal')
-                                            ->first();
+            ->where('kodepoly', $poli->kode)
+            ->where(function ($query) use ($nomr, $nik, $nomorkartu) {
+                $query->where('nomr', $nomr);
+                $query->orWhere('nik', $nik);
+                $query->orWhere('no_kartu', $nomorkartu);
+            })
+            ->whereNull('batal')
+            ->first();
 
-        if (!empty($pendaftaran)) {
+        if (! empty($pendaftaran)) {
             return ResponseFormatter::error([], 'Nomor Antrean Hanya Dapat Diambil 1 Kali Pada Tanggal Yang Sama', 201);
         }
         // END CEK PENDAFTARAN
@@ -499,103 +454,179 @@ class AntreanController extends Controller
             return ResponseFormatter::error([], 'Data pasien ini tidak ditemukan, silahkan Melakukan Registrasi Pasien Baru', 202);
         }
 
-        $pendaftaran_nama            = $pasien->NAMA;
-        $pendaftaran_nomr            = $pasien->NOMR;
-        $pendaftaran_provinsi        = $pasien->KDPROVINSI;
-        $pendaftaran_kota            = $pasien->KOTA;
-        $pendaftaran_kecamatan       = $pasien->KDKECAMATAN;
-        $pendaftaran_kelurahan       = $pasien->KELURAHAN;
-        $pendaftaran_alamat          = $pasien->ALAMAT;
-        $pendaftaran_jenis_kelamin   = in_array($pasien->JENISKELAMIN, ['L', 'P']) ? $jenis_kelamin[$pasien->JENISKELAMIN] : $pasien->JENISKELAMIN;
-        $pendaftaran_notelp          = $request->nohp;
-        $pendaftaran_tempat          = $pasien->TEMPAT;
-        $pendaftaran_tgllahir        = $pasien->TGLLAHIR;
+        $pendaftaran_nama = $pasien->NAMA;
+        $pendaftaran_nomr = $pasien->NOMR;
+        $pendaftaran_provinsi = $pasien->KDPROVINSI;
+        $pendaftaran_kota = $pasien->KOTA;
+        $pendaftaran_kecamatan = $pasien->KDKECAMATAN;
+        $pendaftaran_kelurahan = $pasien->KELURAHAN;
+        $pendaftaran_alamat = $pasien->ALAMAT;
+        $pendaftaran_jenis_kelamin = in_array($pasien->JENISKELAMIN, ['L', 'P']) ? $jenis_kelamin[$pasien->JENISKELAMIN] : $pasien->JENISKELAMIN;
+        $pendaftaran_notelp = $request->nohp;
+        $pendaftaran_tempat = $pasien->TEMPAT;
+        $pendaftaran_tgllahir = $pasien->TGLLAHIR;
         // END DATA PASIEN
 
         // BEGIN SIMPAN PENDAFTARAN ONLINE
-        $pendaftaran_online                  = new AgPendaftaranOnline;
-        $pendaftaran_online->nama            = $pendaftaran_nama;
-        $pendaftaran_online->nomr            = $pendaftaran_nomr;
-        $pendaftaran_online->provinsi        = $pendaftaran_provinsi;
-        $pendaftaran_online->kota            = $pendaftaran_kota;
-        $pendaftaran_online->kecamatan       = $pendaftaran_kecamatan;
-        $pendaftaran_online->kelurahan       = $pendaftaran_kelurahan;
-        $pendaftaran_online->alamat          = $pendaftaran_alamat;
-        $pendaftaran_online->jenis_kelamin   = $pendaftaran_jenis_kelamin;
-        $pendaftaran_online->kodepoly        = $poli->kode;
-        $pendaftaran_online->kodedokter      = $dokter->KDDOKTER;
-        $pendaftaran_online->telepon         = $pendaftaran_notelp;
-        $pendaftaran_online->tempat          = $pendaftaran_tempat;
-        $pendaftaran_online->tanggal_lahir   = $pendaftaran_tgllahir;
-        $pendaftaran_online->tanggal_daftar  = date('Y-m-d H:i:s');
+        $pendaftaran_online = new AgPendaftaranOnline;
+        $pendaftaran_online->nama = $pendaftaran_nama;
+        $pendaftaran_online->nomr = $pendaftaran_nomr;
+        $pendaftaran_online->provinsi = $pendaftaran_provinsi;
+        $pendaftaran_online->kota = $pendaftaran_kota;
+        $pendaftaran_online->kecamatan = $pendaftaran_kecamatan;
+        $pendaftaran_online->kelurahan = $pendaftaran_kelurahan;
+        $pendaftaran_online->alamat = $pendaftaran_alamat;
+        $pendaftaran_online->jenis_kelamin = $pendaftaran_jenis_kelamin;
+        $pendaftaran_online->kodepoly = $poli->kode;
+        $pendaftaran_online->kodedokter = $dokter->KDDOKTER;
+        $pendaftaran_online->telepon = $pendaftaran_notelp;
+        $pendaftaran_online->tempat = $pendaftaran_tempat;
+        $pendaftaran_online->tanggal_lahir = $pendaftaran_tgllahir;
+        $pendaftaran_online->tanggal_daftar = date('Y-m-d H:i:s');
         $pendaftaran_online->tanggal_periksa = $request->tanggalperiksa;
-        $pendaftaran_online->nik             = $request->nik;
-        $pendaftaran_online->cara_bayar      = 10;
-        $pendaftaran_online->no_kartu        = $request->nomorkartu;
-        $pendaftaran_online->via             = 'mobile_jkn';
-        $pendaftaran_online->via_new_app     = 1;
-        $pendaftaran_online->versi_baru      = 1;
-        $pendaftaran_online->status_hadir    = 0;
+        $pendaftaran_online->nik = $request->nik;
+        $pendaftaran_online->cara_bayar = 10;
+        $pendaftaran_online->no_kartu = $request->nomorkartu;
+        $pendaftaran_online->via = 'mobile_jkn';
+        $pendaftaran_online->via_new_app = 1;
+        $pendaftaran_online->versi_baru = 1;
+        $pendaftaran_online->status_hadir = 0;
         $pendaftaran_online->save();
         // END SIMPAN PENDAFTARAN ONLINE
 
         // BEGIN SIMPAN PENDAFTARAN ONLINE
-        $pendaftaran_online_bpjs = new AgPendaftaranOnlineBpjs();
+        $pendaftaran_online_bpjs = new AgPendaftaranOnlineBpjs;
         $pendaftaran_online_bpjs->id_pendaftaran_online = $pendaftaran_online->id;
-        $pendaftaran_online_bpjs->no_kartu              = $pendaftaran_online->no_kartu;
-        $pendaftaran_online_bpjs->ppk_pelayanan         = '1133R001';
-        $pendaftaran_online_bpjs->kelas_rawat           = 3;
+        $pendaftaran_online_bpjs->no_kartu = $pendaftaran_online->no_kartu;
+        $pendaftaran_online_bpjs->ppk_pelayanan = '1133R001';
+        $pendaftaran_online_bpjs->kelas_rawat = 3;
         $pendaftaran_online_bpjs->save();
         // END SIMPAN PENDAFTARAN ONLINE
 
         $antrean_baru = new Antrean;
-        $antrean_baru->kd_poli      = $poli->kode;
-        $antrean_baru->kd_dokter    = $dokter->KDDOKTER;
-        $antrean_baru->id_online    = $pendaftaran_online->id;
-        $antrean_baru->no_urut      = $urut_baru;
-        $antrean_baru->tgl          = $request->tanggalperiksa;
-        $antrean_baru->estimasi     = date('Y-m-d H:i:s', $estimasi);
+        $antrean_baru->kd_poli = $poli->kode;
+        $antrean_baru->kd_dokter = $dokter->KDDOKTER;
+        $antrean_baru->id_online = $pendaftaran_online->id;
+        $antrean_baru->no_urut = $urut_baru;
+        $antrean_baru->tgl = $request->tanggalperiksa;
+        $antrean_baru->estimasi = date('Y-m-d H:i:s', $estimasi);
         $antrean_baru->kode_booking = $kodebooking;
-        $antrean_baru->nomr         = $pendaftaran_online->nomr;
-        $antrean_baru->sesi         = $sesi;
+        $antrean_baru->nomr = $pendaftaran_online->nomr;
+        $antrean_baru->sesi = $sesi;
         $antrean_baru->save();
 
         // dispatch(new ProccessReferensi($request->nomorreferensi, $request->jeniskunjungan, $pendaftaran_online->id));
-        Log::info('Response : ' . json_encode([
-            'nomorantrean'     => $urut_baru,
-            'angkaantrean'     => $urut_baru,
-            'kodebooking'      => $kodebooking,
-            'norm'             => $pasien->NOMR,
-            'namapoli'         => $poli->nama,
-            'namadokter'       => $dokter->NAMADOKTER,
+        $responsePayload = [
+            'nomorantrean' => $urut_baru,
+            'angkaantrean' => $urut_baru,
+            'kodebooking' => $kodebooking,
+            'norm' => $pasien->NOMR,
+            'namapoli' => $poli->nama,
+            'namadokter' => $dokter->NAMADOKTER,
             'estimasidilayani' => $estimasi * 1000,
-            'sisakuotajkn'     => $sisaantrean - 1,
-            'kuotajkn'         => $kuota,
-            'sisakuotanonjkn'  => $sisaantrean - 1,
-            'kuotanonjkn'      => $kuota,
-            'keterangan'       => "Peserta harap 60 menit lebih awal guna pencatatan administrasi.",
-        ]));
+            'sisakuotajkn' => $sisaantrean - 1,
+            'kuotajkn' => $kuota,
+            'sisakuotanonjkn' => $sisaantrean - 1,
+            'kuotanonjkn' => $kuota,
+            'keterangan' => 'Peserta harap 60 menit lebih awal guna pencatatan administrasi.',
+        ];
+
+        Log::info('Response : '.json_encode($responsePayload));
 
         try {
-            $url = 'http://10.0.108.247:8000/api/sync-bpjs?id=' . $pendaftaran_online->id;
-            $response = Http::get($url);
+            $url = 'http://10.0.108.247:8000/api/sync-bpjs?id='.$pendaftaran_online->id;
+            Http::get($url);
         } catch (\Exception $e) {
-
+            Log::warning('Sync BPJS gagal: '.$e->getMessage());
         }
 
-        return ResponseFormatter::success([
-            'nomorantrean'     => $urut_baru,
-            'angkaantrean'     => $urut_baru,
-            'kodebooking'      => $kodebooking,
-            'norm'             => $pasien->NOMR,
-            'namapoli'         => $poli->nama,
-            'namadokter'       => $dokter->NAMADOKTER,
-            'estimasidilayani' => $estimasi * 1000,
-            'sisakuotajkn'     => $sisaantrean - 1,
-            'kuotajkn'         => $kuota,
-            'sisakuotanonjkn'  => $sisaantrean - 1,
-            'kuotanonjkn'      => $kuota,
-            'keterangan'       => "Peserta harap 60 menit lebih awal guna pencatatan administrasi.",
-        ], "Ok", 200);
+        return ResponseFormatter::success($responsePayload, 'Ok', 200);
+    }
+
+    private function findAntreanByBooking(string $kodebooking): ?Antrean
+    {
+        return Antrean::where('kode_booking', $kodebooking)
+            ->orWhere('id_online', $kodebooking)
+            ->first();
+    }
+
+    private function findJamPelayanan($kodePoli, $kodeDokter, string $tanggal, array $jampraktek): ?JamPelayanan
+    {
+        return JamPelayanan::where('kodepoly', $kodePoli)
+            ->where('kodedokter', $kodeDokter)
+            ->where('hari', date('N', strtotime($tanggal)))
+            ->where('jam_mulai', $jampraktek[0])
+            ->where('jam_selesai', $jampraktek[1])
+            ->first();
+    }
+
+    private function findJamPelayananBySesi($kodePoli, $kodeDokter, string $tanggal, string $sesi): ?JamPelayanan
+    {
+        return JamPelayanan::where('kodepoly', $kodePoli)
+            ->where('kodedokter', $kodeDokter)
+            ->where('hari', date('N', strtotime($tanggal)))
+            ->where('sesi', $sesi)
+            ->orderBy('jam_mulai')
+            ->first();
+    }
+
+    private function antreanAktifQuery(string $tanggal, $kodePoli, $kodeDokter, string $sesi): Builder
+    {
+        return Antrean::where('tgl', $tanggal)
+            ->where('kd_poli', $kodePoli)
+            ->where('kd_dokter', $kodeDokter)
+            ->where('batal', '<>', '1')
+            ->where('sesi', $sesi);
+    }
+
+    private function antreanBelumDilayaniQuery(string $tanggal, $kodePoli, $kodeDokter, string $sesi): Builder
+    {
+        return Antrean::whereHas('pendaftaran', function (Builder $query) {
+            $query->where('status', 0);
+        })
+            ->where('tgl', $tanggal)
+            ->where('kd_poli', $kodePoli)
+            ->where('kd_dokter', $kodeDokter)
+            ->where('sesi', $sesi);
+    }
+
+    private function buildAntreanSummary(string $tanggal, $kodePoli, $kodeDokter, string $sesi, $kuota): array
+    {
+        $totalantrean = $this->antreanAktifQuery($tanggal, $kodePoli, $kodeDokter, $sesi)->count();
+        $antrean = $this->antreanBelumDilayaniQuery($tanggal, $kodePoli, $kodeDokter, $sesi)->get();
+        $sisaantrean = $kuota - $totalantrean;
+
+        return [
+            'totalantrean' => $totalantrean,
+            'sisaantrean' => $antrean->count(),
+            'antreanpanggil' => $antrean->first() ? $antrean->first()->no_urut : null,
+            'sisaantrean_kuota' => $sisaantrean < 1 ? 0 : $sisaantrean,
+        ];
+    }
+
+    private function buildStatusPayload(string $namaPoli, string $namaDokter, array $summary, $kuota): array
+    {
+        return [
+            'namapoli' => $namaPoli,
+            'namadokter' => $namaDokter,
+            'totalantrean' => $summary['totalantrean'],
+            'sisaantrean' => $summary['sisaantrean'],
+            'antreanpanggil' => $summary['antreanpanggil'],
+            'sisakuotajkn' => $summary['sisaantrean_kuota'],
+            'kuotajkn' => $kuota,
+            'sisakuotanonjkn' => $summary['sisaantrean_kuota'],
+            'kuotanonjkn' => $kuota,
+            'keterangan' => '',
+        ];
+    }
+
+    private function getKuotaNilai(JamPelayanan $jamPelayanan)
+    {
+        return $jamPelayanan->kuota == '' ? self::DEFAULT_KUOTA : $jamPelayanan->kuota;
+    }
+
+    private function getSesi(?string $sesi): string
+    {
+        return $sesi ?? self::DEFAULT_SESI;
     }
 }
